@@ -12,7 +12,9 @@ import makeWASocket, {
 const AUTH_DIR = "./auth";
 fs.mkdirSync(AUTH_DIR, { recursive: true });
 
-const logger = pino({ level: "silent" });
+const logger = pino({
+  level: process.env.BAILEYS_LOG_LEVEL || "info",
+});
 
 let rememberedPhone = null;
 let pairingRequested = false;
@@ -60,10 +62,36 @@ async function getPhoneNumber() {
   }
 }
 
+function logConnectionUpdate(update) {
+  const code = disconnectCode(update.lastDisconnect);
+  const message = update.lastDisconnect?.error?.message || null;
+
+  console.log("\n🔌 connection.update");
+  console.dir(
+    {
+      connection: update.connection ?? null,
+      hasQr: Boolean(update.qr),
+      isNewLogin: update.isNewLogin ?? null,
+      receivedPendingNotifications:
+        update.receivedPendingNotifications ?? null,
+      disconnectCode: code,
+      disconnectMessage: message,
+    },
+    { depth: null }
+  );
+}
+
 async function startSocket() {
   restarting = false;
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+  // Ask for the phone number BEFORE opening the socket. Waiting for terminal
+  // input after WhatsApp has already issued QR refs can let those refs expire
+  // and produce a 408 "QR refs attempts ended" before requestPairingCode runs.
+  if (!state.creds.registered) {
+    await getPhoneNumber();
+  }
 
   let version;
   try {
@@ -82,20 +110,37 @@ async function startSocket() {
     markOnlineOnConnect: false,
   });
 
-  sock.ev.on("creds.update", saveCreds);
+  sock.ev.on("creds.update", async (update) => {
+    // Do not dump credential values/private keys to the terminal. Log only
+    // which credential fields changed, then persist them normally.
+    console.log("\n🔐 creds.update");
+    console.log("Changed fields:", Object.keys(update));
+    console.log("Registered:", Boolean(state.creds.registered));
+    await saveCreds();
+  });
 
-  sock.ev.on("connection.update", async ({ connection, qr, lastDisconnect }) => {
-    // Pairing-code-only mode:
-    // wait until Baileys reaches the initial QR-ready stage, but never display QR.
+  sock.ev.on("messages.upsert", ({ messages, type }) => {
+    console.log(`\n📩 messages.upsert (${type})`);
+
+    for (const message of messages) {
+      console.dir(message, { depth: null });
+    }
+  });
+
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, qr, lastDisconnect } = update;
+    logConnectionUpdate(update);
+
+    // Pairing-code-only mode. We use the first QR-ready event only as the
+    // signal that Baileys/WhatsApp pairing transport is ready. QR itself is
+    // deliberately never displayed.
     if (qr && !state.creds.registered && !pairingRequested) {
       pairingRequested = true;
 
       try {
-        const phone = await getPhoneNumber();
+        console.log("\nRequesting pairing code for:", rememberedPhone);
 
-        console.log("\nRequesting pairing code for:", phone);
-
-        const code = await sock.requestPairingCode(phone);
+        const code = await sock.requestPairingCode(rememberedPhone);
 
         console.log("\n================================");
         console.log("PAIRING CODE:", code);
@@ -114,6 +159,7 @@ async function startSocket() {
       pairingRequested = false;
       console.log("\n✅ WhatsApp connected.");
       console.log("User:", sock.user);
+      console.log("Waiting for incoming WhatsApp messages...");
     }
 
     if (connection === "close") {
