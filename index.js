@@ -5,7 +5,6 @@ import { randomBytes } from "crypto";
 import pino from "pino";
 
 import makeWASocket, {
-  Browsers,
   DisconnectReason,
   S_WHATSAPP_NET,
   aesEncryptCTR,
@@ -221,7 +220,9 @@ async function startSocket() {
   const sock = makeWASocket({
     auth: state,
     ...(version ? { version } : {}),
-    browser: Browsers.macOS("Desktop"),
+    // Keep Baileys' default Chrome browser identity on rc14. Explicit
+    // Browsers.macOS("Desktop") can hit the pre-#2741 desktop identity bug
+    // and fail with 401 before the pairing transport reaches the QR stage.
     logger,
     printQRInTerminal: false,
     markOnlineOnConnect: false,
